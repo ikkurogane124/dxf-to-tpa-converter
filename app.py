@@ -1,7 +1,8 @@
 import streamlit as st
 import numpy as np
+import matplotlib.pyplot as plt
 
-def convert_auto_dimensions(dxf_file):
+def convert_dxf_to_tpa_with_preview(dxf_file):
     try:
         content = dxf_file.getvalue().decode('utf-8', errors='ignore').splitlines()
         raw_lines, circles = [], []
@@ -28,10 +29,9 @@ def convert_auto_dimensions(dxf_file):
                     circles.append(temp_data.copy()); temp_data = {}; current_entity = None
 
         if not raw_lines and not circles:
-            return "Errore: Il file DXF sembra vuoto o non leggibile.", 0, 0
+            return None, 0, 0, [], [], 0, 0
 
-        # 2. CALCOLO AUTOMATICO INGOMBRO E ORIGINE
-        # Troviamo i minimi e massimi assoluti per definire il pannello (DL e DH)
+        # 2. CALCOLO INGOMBRO E ORIGINE
         all_x = ([l['x1'] for l in raw_lines] + [l['x2'] for l in raw_lines] + 
                  [c['cx'] + c['r'] for c in circles] + [c['cx'] - c['r'] for c in circles])
         all_y = ([l['y1'] for l in raw_lines] + [l['y2'] for l in raw_lines] + 
@@ -39,10 +39,7 @@ def convert_auto_dimensions(dxf_file):
         
         min_x, max_x = min(all_x), max(all_x)
         min_y, max_y = min(all_y), max(all_y)
-
-        # Dimensioni del pannello calcolate dinamicamente
-        dl = round(max_x - min_x, 2)
-        dh = round(max_y - min_y, 2)
+        dl, dh = round(max_x - min_x, 2), round(max_y - min_y, 2)
 
         # 3. COSTRUZIONE FILE TPA
         header = [
@@ -50,21 +47,16 @@ def convert_auto_dimensions(dxf_file):
             f"$=c:\\albatros\\product\\import\\{dxf_file.name}",
             "::SIDE=1;",
             f"::UNm DL={dl} DH={dh} DS=20 OX=0 OY=0 OZ=0",
-            "::FLT0=0 FLT1=0 FLT2=0 FLT3=0 FLT4=0 FLT5=0 FLT6=0 FLT7=0",
-            "VAR{\n}VAR",
-            "OPTI{\n}OPTI",
-            "SIDE#1{",
+            "VAR{\n}VAR\nOPTI{\n}OPTI\nSIDE#1{",
             "$=side  1",
             f"::LF={dl} HF={dh} SF=20"
         ]
 
-        # Scrittura Linee con reset origine a 0,0
         for l in raw_lines:
             x1, y1 = round(l['x1'] - min_x, 2), round(l['y1'] - min_y, 2)
             x2, y2 = round(l['x2'] - min_x, 2), round(l['y2'] - min_y, 2)
             header.append(f"W#2201{{ ::WTl \n#1={x2} #8054={x1} #2={y2} #8055={y1} #3=0 #8056=0 #8015=1 #9022=0 }}W")
 
-        # Scrittura Fori con reset origine, Utensile 121 e macro di attacco
         for c in circles:
             cx, cy = round(c['cx'] - min_x, 2), round(c['cy'] - min_y, 2)
             r = round(c['r'], 2)
@@ -72,53 +64,49 @@ def convert_auto_dimensions(dxf_file):
             header.append(f"W#2101{{ ::WTa \n#1=0 #2=0 #8015=1 #3=0 #8056=0 #31={r} #32=0 #34=0 #36=0 #8017={r} }}W")
 
         header.append("}SIDE")
-        
-        # Generazione automatica degli altri lati (SIDE 2-6)
         for s in range(2, 7):
             l_v, h_v, s_v = (dl, dh, 20) if s == 2 else (dl, 20, 20) if s in [3, 5] else (dh, 20, dl)
             header.append(f"SIDE#{s}{{\n$=side  {s}\n::LF={l_v} HF={h_v} SF={s_v}\n}}SIDE")
-        
         header.append("}")
         
-        return "\r\n".join(header), dl, dh
+        return "\r\n".join(header), dl, dh, raw_lines, circles, min_x, min_y
     except Exception as e:
-        return f"Errore durante la conversione: {str(e)}", 0, 0
+        st.error(f"Errore: {e}")
+        return None, 0, 0, [], [], 0, 0
 
-# --- INTERFACCIA STREAMLIT ---
-st.set_page_config(page_title="TPA Smart Converter", page_icon="⚙️", layout="centered")
+# --- INTERFACCIA UTENTE ---
+st.set_page_config(page_title="TPA Visual Converter", layout="wide")
+st.title("🚀 DXF to TPA Visual Converter")
 
-st.title("⚙️ TPA Smart Converter")
-st.subheader("Conversione automatica DXF -> TPA (Tool 121)")
+file = st.file_uploader("Carica il tuo file DXF", type="dxf")
 
-st.info("""
-**Come funziona:**
-1. Carica il file DXF.
-2. Il sistema calcola da solo le dimensioni del pannello.
-3. Il disegno viene spostato automaticamente all'origine (0,0).
-4. Scarica il file pronto per EdiCad.
-""")
-
-uploaded_file = st.file_uploader("Scegli un file DXF", type="dxf")
-
-if uploaded_file:
-    tpa_content, final_dl, final_dh = convert_auto_dimensions(uploaded_file)
+if file:
+    tpa_txt, dl, dh, lines, circles, ox, oy = convert_dxf_to_tpa_with_preview(file)
     
-    if isinstance(tpa_content, str) and "Errore" in tpa_content:
-        st.error(tpa_content)
-    else:
-        st.markdown(f"### ✅ Analisi Completata")
-        col1, col2 = st.columns(2)
-        col1.metric("Lunghezza (DL)", f"{final_dl} mm")
-        col2.metric("Altezza (DH)", f"{final_dh} mm")
+    if tpa_txt:
+        col1, col2 = st.columns([1, 1])
         
-        st.success("File TPA generato correttamente!")
-        
-        st.download_button(
-            label="📥 Scarica File .TPA",
-            data=tpa_content,
-            file_name=uploaded_file.name.replace(".dxf", ".tpa"),
-            mime="text/plain"
-        )
+        with col1:
+            st.subheader("📊 Dati Pannello")
+            st.metric("Lunghezza (DL)", f"{dl} mm")
+            st.metric("Altezza (DH)", f"{dh} mm")
+            st.success("Conversione completata con successo!")
+            st.download_button("📥 Scarica .TPA", tpa_txt, file.name.replace(".dxf", ".tpa"))
 
-st.divider()
-st.caption("Configurazione: Tool 121 | Reset Origine: Automatico | Formato: EdiCad TPA")
+        with col2:
+            st.subheader("🖼️ Anteprima Grafica")
+            fig, ax = plt.subplots()
+            # Disegna Pannello
+            rect = plt.Rectangle((0, 0), dl, dh, color='#D2B48C', alpha=0.5, label='Pannello')
+            ax.add_patch(rect)
+            # Disegna Linee
+            for l in lines:
+                ax.plot([l['x1']-ox, l['x2']-ox], [l['y1']-oy, l['y2']-oy], color='blue', linewidth=1)
+            # Disegna Fori
+            for c in circles:
+                circle = plt.Circle((c['cx']-ox, c['cy']-oy), c['r'], color='red', fill=True)
+                ax.add_patch(circle)
+            
+            ax.set_aspect('equal')
+            plt.grid(True, linestyle='--', alpha=0.6)
+            st.pyplot(fig)
