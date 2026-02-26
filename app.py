@@ -1,18 +1,18 @@
 import streamlit as st
-import io
 import numpy as np
 
-def convert_to_mirror_match(dxf_file):
+def convert_auto_dimensions(dxf_file):
     try:
         content = dxf_file.getvalue().decode('utf-8', errors='ignore').splitlines()
         raw_lines, circles = [], []
         current_entity, temp_data = None, {}
 
-        # 1. LETTURA DXF
+        # 1. LETTURA DATI DAL DXF
         for i, line in enumerate(content):
             line = line.strip()
             if line == "LINE": current_entity = "LINE"
             elif line == "CIRCLE": current_entity = "CIRCLE"
+            
             if current_entity == "LINE":
                 if line == "10": temp_data['x1'] = float(content[i+1])
                 elif line == "20": temp_data['y1'] = float(content[i+1])
@@ -27,16 +27,24 @@ def convert_to_mirror_match(dxf_file):
                 if len(temp_data) == 3:
                     circles.append(temp_data.copy()); temp_data = {}; current_entity = None
 
-        # 2. CALCOLO ORIGINE CON ARROTONDAMENTO FISSO
-        all_x = [l['x1'] for l in raw_lines] + [l['x2'] for l in raw_lines] + [c['cx'] for c in circles]
-        all_y = [l['y1'] for l in raw_lines] + [l['y2'] for l in raw_lines] + [c['cy'] for c in circles]
+        if not raw_lines and not circles:
+            return "Errore: Il file DXF sembra vuoto o non leggibile.", 0, 0
+
+        # 2. CALCOLO AUTOMATICO INGOMBRO E ORIGINE
+        # Troviamo i minimi e massimi assoluti per definire il pannello (DL e DH)
+        all_x = ([l['x1'] for l in raw_lines] + [l['x2'] for l in raw_lines] + 
+                 [c['cx'] + c['r'] for c in circles] + [c['cx'] - c['r'] for c in circles])
+        all_y = ([l['y1'] for l in raw_lines] + [l['y2'] for l in raw_lines] + 
+                 [c['cy'] + c['r'] for c in circles] + [c['cy'] - c['r'] for c in circles])
         
-        # Usiamo un arrotondamento per evitare scarti di 0.00001 che spostano tutto
-        min_x = round(min(all_x), 1) if all_x else 0
-        min_y = round(min(all_y), 1) if all_y else 0
+        min_x, max_x = min(all_x), max(all_x)
+        min_y, max_y = min(all_y), max(all_y)
 
-        dl, dh = 1680.0, 512.0
+        # Dimensioni del pannello calcolate dinamicamente
+        dl = round(max_x - min_x, 2)
+        dh = round(max_y - min_y, 2)
 
+        # 3. COSTRUZIONE FILE TPA
         header = [
             "TPA\\ALBATROS\\EDICAD\\00.00:561:1;698",
             f"$=c:\\albatros\\product\\import\\{dxf_file.name}",
@@ -50,35 +58,67 @@ def convert_to_mirror_match(dxf_file):
             f"::LF={dl} HF={dh} SF=20"
         ]
 
-        # 3. SCRITTURA LINEE (Arrotondate come l'originale)
+        # Scrittura Linee con reset origine a 0,0
         for l in raw_lines:
-            x1 = round(l['x1'] - min_x, 2)
-            y1 = round(l['y1'] - min_y, 2)
-            x2 = round(l['x2'] - min_x, 2)
-            y2 = round(l['y2'] - min_y, 2)
+            x1, y1 = round(l['x1'] - min_x, 2), round(l['y1'] - min_y, 2)
+            x2, y2 = round(l['x2'] - min_x, 2), round(l['y2'] - min_y, 2)
             header.append(f"W#2201{{ ::WTl \n#1={x2} #8054={x1} #2={y2} #8055={y1} #3=0 #8056=0 #8015=1 #9022=0 }}W")
 
-        # 4. SCRITTURA FORI (Tool 121 + Macro Identica)
+        # Scrittura Fori con reset origine, Utensile 121 e macro di attacco
         for c in circles:
-            cx = round(c['cx'] - min_x, 2)
-            cy = round(c['cy'] - min_y, 2)
+            cx, cy = round(c['cx'] - min_x, 2), round(c['cy'] - min_y, 2)
             r = round(c['r'], 2)
             header.append(f"W#89{{ ::WTs \n#1={cx} #2={cy} #3=0 #8015=0 #8101=0 #205=121 #40=0 #201=1 #203=1 #1001=100 #8135=0 #8136=0 #43=0 }}W")
             header.append(f"W#2101{{ ::WTa \n#1=0 #2=0 #8015=1 #3=0 #8056=0 #31={r} #32=0 #34=0 #36=0 #8017={r} }}W")
 
         header.append("}SIDE")
         
+        # Generazione automatica degli altri lati (SIDE 2-6)
         for s in range(2, 7):
             l_v, h_v, s_v = (dl, dh, 20) if s == 2 else (dl, 20, 20) if s in [3, 5] else (dh, 20, dl)
             header.append(f"SIDE#{s}{{\n$=side  {s}\n::LF={l_v} HF={h_v} SF={s_v}\n}}SIDE")
         
         header.append("}")
-        return "\r\n".join(header)
+        
+        return "\r\n".join(header), dl, dh
     except Exception as e:
-        return f"Errore: {str(e)}"
+        return f"Errore durante la conversione: {str(e)}", 0, 0
 
-st.title("🎯 TPA Mirror Match (Identico 100%)")
-file = st.file_uploader("Carica il DXF", type="dxf")
-if file:
-    tpa_content = convert_to_mirror_match(file)
-    st.download_button("📥 Scarica TPA Identico", tpa_content, f"{file.name.replace('.dxf', '.tpa')}")
+# --- INTERFACCIA STREAMLIT ---
+st.set_page_config(page_title="TPA Smart Converter", page_icon="⚙️", layout="centered")
+
+st.title("⚙️ TPA Smart Converter")
+st.subheader("Conversione automatica DXF -> TPA (Tool 121)")
+
+st.info("""
+**Come funziona:**
+1. Carica il file DXF.
+2. Il sistema calcola da solo le dimensioni del pannello.
+3. Il disegno viene spostato automaticamente all'origine (0,0).
+4. Scarica il file pronto per EdiCad.
+""")
+
+uploaded_file = st.file_uploader("Scegli un file DXF", type="dxf")
+
+if uploaded_file:
+    tpa_content, final_dl, final_dh = convert_auto_dimensions(uploaded_file)
+    
+    if isinstance(tpa_content, str) and "Errore" in tpa_content:
+        st.error(tpa_content)
+    else:
+        st.markdown(f"### ✅ Analisi Completata")
+        col1, col2 = st.columns(2)
+        col1.metric("Lunghezza (DL)", f"{final_dl} mm")
+        col2.metric("Altezza (DH)", f"{final_dh} mm")
+        
+        st.success("File TPA generato correttamente!")
+        
+        st.download_button(
+            label="📥 Scarica File .TPA",
+            data=tpa_content,
+            file_name=uploaded_file.name.replace(".dxf", ".tpa"),
+            mime="text/plain"
+        )
+
+st.divider()
+st.caption("Configurazione: Tool 121 | Reset Origine: Automatico | Formato: EdiCad TPA")
